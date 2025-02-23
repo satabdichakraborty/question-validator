@@ -69,9 +69,11 @@ const ValidateItem: React.FC = () => {
         )}
 
         <Button
-          variant="primary"
+          variant="normal"
           onClick={handleAnswerQuestion}
           disabled={!processedQuestion?.isValid}
+          data-testid="answer-button"
+          className="aws-orange-button"
         >
           Answer Question
         </Button>
