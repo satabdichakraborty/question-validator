@@ -1,0 +1,286 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'AWS Step Functions State Machine with S3 Trigger and Lambda functions'
+
+Resources:
+  # S3 Bucket that will trigger the state machine
+  SourceBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      NotificationConfiguration:
+        EventBridgeConfiguration:
+          EventBridgeEnabled: true
+      
+  # Lambda Function A - Puts file data into DynamoDB
+  LambdaFunctionARoleA:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: S3DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub 'arn:aws:s3:::${SourceBucket}/*'
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                Resource: !GetAtt FileDataTable.Arn
+
+  LambdaFunctionA:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt LambdaFunctionARoleA.Arn
+      Runtime: nodejs18.x
+      Code:
+        ZipFile: |
+          const AWS = require('aws-sdk');
+          const s3 = new AWS.S3();
+          const dynamodb = new AWS.DynamoDB.DocumentClient();
+
+          exports.handler = async (event) => {
+            console.log('Event:', JSON.stringify(event, null, 2));
+            
+            // Extract bucket and key information from the event
+            const bucketName = event.detail.bucket.name;
+            const objectKey = event.detail.object.key;
+            
+            try {
+              // Get the file metadata from S3
+              const s3Response = await s3.headObject({
+                Bucket: bucketName,
+                Key: objectKey
+              }).promise();
+              
+              // Prepare item for DynamoDB
+              const item = {
+                fileId: objectKey,
+                fileName: objectKey.split('/').pop(),
+                fileSize: s3Response.ContentLength,
+                contentType: s3Response.ContentType,
+                lastModified: s3Response.LastModified.toISOString(),
+                uploadTime: new Date().toISOString()
+              };
+              
+              // Store in DynamoDB
+              await dynamodb.put({
+                TableName: process.env.TABLE_NAME,
+                Item: item
+              }).promise();
+              
+              return {
+                statusCode: 200,
+                fileId: item.fileId,
+                message: `File ${objectKey} metadata stored in DynamoDB`
+              };
+            } catch (error) {
+              console.error('Error:', error);
+              throw error;
+            }
+          };
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref FileDataTable
+      Timeout: 30
+
+  # Lambda Function B
+  LambdaFunctionBRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                Resource: !GetAtt FileDataTable.Arn
+
+  LambdaFunctionB:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt LambdaFunctionBRole.Arn
+      Runtime: nodejs18.x
+      Code:
+        ZipFile: |
+          exports.handler = async (event) => {
+            console.log('Event:', JSON.stringify(event, null, 2));
+            
+            // Here you would implement Function B's logic
+            // This is a placeholder implementation
+            
+            return {
+              statusCode: 200,
+              fileId: event.fileId,
+              message: 'Successfully processed file in Lambda Function B'
+            };
+          };
+      Timeout: 30
+
+  # Lambda Function D
+  LambdaFunctionDRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  LambdaFunctionD:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt LambdaFunctionDRole.Arn
+      Runtime: nodejs18.x
+      Code:
+        ZipFile: |
+          exports.handler = async (event) => {
+            console.log('Event:', JSON.stringify(event, null, 2));
+            
+            // Here you would implement Function D's logic
+            // This is a placeholder implementation
+            
+            return {
+              statusCode: 200,
+              fileId: event.fileId,
+              message: 'Successfully processed file in Lambda Function D'
+            };
+          };
+      Timeout: 30
+
+  # DynamoDB Table to store file data
+  FileDataTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: fileId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: fileId
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+
+  # State Machine Role
+  StateMachineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaInvoke
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !GetAtt LambdaFunctionA.Arn
+                  - !GetAtt LambdaFunctionB.Arn
+                  - !GetAtt LambdaFunctionD.Arn
+
+  # Step Functions State Machine
+  ProcessFileStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      RoleArn: !GetAtt StateMachineRole.Arn
+      Definition:
+        Comment: "A state machine that processes files uploaded to S3"
+        StartAt: ProcessWithLambdaA
+        States:
+          ProcessWithLambdaA:
+            Type: Task
+            Resource: !GetAtt LambdaFunctionA.Arn
+            Next: ProcessWithLambdaB
+          ProcessWithLambdaB:
+            Type: Task
+            Resource: !GetAtt LambdaFunctionB.Arn
+            Next: ProcessWithLambdaD
+          ProcessWithLambdaD:
+            Type: Task
+            Resource: !GetAtt LambdaFunctionD.Arn
+            End: true
+
+  # EventBridge Rule to trigger State Machine when a file is uploaded to S3
+  S3UploadEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: "Rule to trigger state machine when a file is uploaded to S3"
+      EventPattern:
+        source:
+          - aws.s3
+        detail-type:
+          - "Object Created"
+        detail:
+          bucket:
+            name:
+              - !Ref SourceBucket
+      State: ENABLED
+      Targets:
+        - Arn: !Ref ProcessFileStateMachine
+          Id: "StateMachineTarget"
+          RoleArn: !GetAtt EventBridgeRole.Arn
+
+  # Role for EventBridge to invoke Step Functions
+  EventBridgeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StepFunctionsExecution
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - states:StartExecution
+                Resource: !Ref ProcessFileStateMachine
+
+Outputs:
+  SourceBucketName:
+    Description: "Name of the S3 bucket that triggers the workflow"
+    Value: !Ref SourceBucket
+  StateMachineArn:
+    Description: "ARN of the Step Functions state machine"
+    Value: !Ref ProcessFileStateMachine
+  DynamoDBTableName:
+    Description: "Name of the DynamoDB table storing file data"
+    Value: !Ref FileDataTable 
